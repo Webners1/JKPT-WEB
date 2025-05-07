@@ -7,6 +7,8 @@ import { parseUnits, formatUnits, decodeEventLog } from 'viem';
 import { motion } from "framer-motion";
 import { sepolia } from "viem/chains";
 import { SoundManager, SOUNDS } from '../utils/sounds';
+import { useApprove } from '../hooks/useApprove';
+import { TransactionModal } from '../components/TransactionModal';
 
 // Types for better type safety
 type PrizeTier = {
@@ -275,7 +277,7 @@ const createScratchPatterns = () => {
 
 export default function InstantScratchAndWin() {
   const { address, isConnected } = useAccount();
-  const [betAmount, setBetAmount] = useState("10");
+  const betAmount = 100;
   const [isScratching, setIsScratching] = useState(false);
   const [isRevealed, setIsRevealed] = useState(false);
   const [reward, setReward] = useState<Reward | null>(null);
@@ -291,6 +293,13 @@ export default function InstantScratchAndWin() {
   const [percentScratched, setPercentScratched] = useState(0);
   const [isTouchDevice, setIsTouchDevice] = useState(false);
   const [soundEnabled, setSoundEnabled] = useState(true);
+
+  // Transaction modal state
+  const [modalOpen, setModalOpen] = useState(false);
+  const [modalType, setModalType] = useState<'success' | 'error' | 'loading'>('loading');
+  const [modalTitle, setModalTitle] = useState("");
+  const [modalMessage, setModalMessage] = useState("");
+
   const scratchSoundRef = useRef<HTMLAudioElement | null>(null);
   const winSoundRef = useRef<HTMLAudioElement | null>(null);
   const startSoundRef = useRef<HTMLAudioElement | null>(null);
@@ -299,6 +308,8 @@ export default function InstantScratchAndWin() {
   const publicClient = usePublicClient();
   const soundManager = SoundManager.getInstance();
 
+  // Use our custom approval hook
+ 
   // Detect touch device and initialize sounds
   useEffect(() => {
     // Check if we're in a browser environment
@@ -439,6 +450,17 @@ export default function InstantScratchAndWin() {
       refetchInterval: 5000
     }
   });
+  const {
+    approve,
+    isApproving,
+    approvalError,
+    approvalSuccess,
+    approvalHash
+  } = useApprove(
+    TOKEN_ADDRESS,
+    GAME_ADDRESS,
+    Number(tokenDecimals) || 18
+  );
 
   // Update overall loading state
   useEffect(() => {
@@ -533,6 +555,8 @@ export default function InstantScratchAndWin() {
   const initializeScratchCard = () => {
     const canvas = canvasRef.current;
     const ctx = canvas.getContext('2d');
+
+    if (!ctx) return;
 
     // Set canvas dimensions
     canvas.width = 300;
@@ -736,6 +760,12 @@ export default function InstantScratchAndWin() {
     if (!isConnected || loading || (gamePaused === true)) {
       if (gamePaused === true) {
         setError("Game is currently paused by the operator");
+
+        // Show error modal
+        setModalTitle("Game Paused");
+        setModalMessage("The game is currently paused by the operator. Please try again later.");
+        setModalType("error");
+        setModalOpen(true);
       }
       return;
     }
@@ -758,7 +788,7 @@ export default function InstantScratchAndWin() {
 
       // Convert bet amount to token units
       const betAmountInUnits = parseUnits(
-        betAmount,
+        betAmount.toString(),
         Number(tokenDecimals) || 18
       );
 
@@ -767,30 +797,45 @@ export default function InstantScratchAndWin() {
         (minBet && betAmountInUnits < BigInt(minBet)) ||
         (maxBet && betAmountInUnits > BigInt(maxBet))
       ) {
-        throw new Error(
-          `Bet amount must be between ${formatUnits(BigInt(minBet), Number(tokenDecimals))} and ${formatUnits(BigInt(maxBet), Number(tokenDecimals))} ${String(tokenSymbol)}`
-        );
+        const errorMsg = `Bet amount must be between ${formatUnits(BigInt(minBet), Number(tokenDecimals))} and ${formatUnits(BigInt(maxBet), Number(tokenDecimals))} ${String(tokenSymbol)}`;
+        throw new Error(errorMsg);
       }
 
       // Check if user has enough tokens
       if (tokenBalance && betAmountInUnits > BigInt(tokenBalance)) {
-        throw new Error(`Insufficient ${String(tokenSymbol)} balance`);
+        const errorMsg = `Insufficient ${String(tokenSymbol)} balance`;
+        throw new Error(errorMsg);
       }
 
-      // First, approve tokens for the game contract
-      const approvalHash = await approveTokens({
-        address: TOKEN_ADDRESS,
-        abi: tokenABI,
-        functionName: "approve",
-        args: [GAME_ADDRESS, betAmountInUnits],
-        chain: sepolia as any,
-        account: address
-      });
+      // Show approval modal
+      setModalTitle("Approving Tokens");
+      setModalMessage(`Approving ${betAmount} ${String(tokenSymbol)} for the game...`);
+      setModalType("loading");
+      setModalOpen(true);
 
-      // Wait for approval transaction to confirm
-      const approvalReceipt = await publicClient.waitForTransactionReceipt({
-        hash: approvalHash
-      });
+      // Use our custom approve hook
+      let approvalHash;
+      try {
+        approvalHash = await approve(
+          betAmount.toString(),
+          () => {
+            // On approval success
+            setModalTitle("Approval Successful");
+            setModalMessage("Token approval successful. Placing bet...");
+            setModalType("success");
+          },
+          (error) => {
+            // On approval error
+            setModalTitle("Approval Failed");
+            setModalMessage(error.message);
+            setModalType("error");
+            throw error; // Re-throw to be caught by outer catch
+          }
+        );
+      } catch (error) {
+        // This will be caught by the outer catch block
+        throw error;
+      }
 
       // Estimate gas for placeBet transaction
       const gasEstimate = await publicClient.estimateContractGas({
@@ -801,8 +846,13 @@ export default function InstantScratchAndWin() {
         account: address
       });
 
-      // Add 20% buffer to the gas estimate
+      // Add 50% buffer to the gas estimate
       const gasWithBuffer = (gasEstimate * BigInt(150)) / BigInt(100);
+
+      // Update modal for bet placement
+      setModalTitle("Placing Bet");
+      setModalMessage(`Placing bet of ${betAmount} ${String(tokenSymbol)}...`);
+      setModalType("loading");
 
       // Then place the bet with estimated gas
       const betHash = await placeBet({
@@ -817,6 +867,9 @@ export default function InstantScratchAndWin() {
 
       // Save transaction hash for UI display
       setTxHash(betHash);
+
+      // Close the modal after successful bet placement
+      setModalOpen(false);
 
       // Wait for transaction to be confirmed
       const receipt = await publicClient.waitForTransactionReceipt({
@@ -876,7 +929,14 @@ export default function InstantScratchAndWin() {
       }
     } catch (err) {
       console.error("Error playing game:", err);
-      setError(err instanceof Error ? err.message : "Failed to play. Please try again.");
+      const errorMessage = err instanceof Error ? err.message : "Failed to play. Please try again.";
+      setError(errorMessage);
+
+      // Show error modal
+      setModalTitle("Supply Failed");
+      setModalMessage(errorMessage);
+      setModalType("error");
+      setModalOpen(true);
     } finally {
       setLoading(false);
     }
@@ -888,6 +948,8 @@ export default function InstantScratchAndWin() {
 
     const canvas = scratchRef.current;
     const ctx = canvas.getContext('2d');
+
+    if (!ctx) return;
 
     // Clear the canvas
     ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -936,7 +998,7 @@ export default function InstantScratchAndWin() {
 
       // Draw reward amount
       ctx.font = "bold 40px Arial";
-      const rewardAmount = (parseFloat(betAmount) * rewardItem.multiplier).toFixed(2);
+      const rewardAmount = (parseFloat(betAmount.toString()) * rewardItem.multiplier).toFixed(2);
       ctx.fillText(`${rewardAmount}`, canvas.width / 2, canvas.height / 2 - 10);
 
       // Draw token symbol
@@ -968,10 +1030,53 @@ export default function InstantScratchAndWin() {
     // Update UI to reflect mute state
   };
 
+  // Add state for attempts and win modal
+  const [attempt, setAttempt] = useState(() => {
+    if (typeof window !== 'undefined') {
+      const stored = localStorage.getItem('scratch-attempt');
+      return stored ? parseInt(stored, 10) : 0;
+    }
+    return 0;
+  });
+  const [showWinModal, setShowWinModal] = useState(false);
+
+  // Update attempt in localStorage
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('scratch-attempt', attempt.toString());
+    }
+  }, [attempt]);
+
+  // Scratch result logic
+  const isWin = attempt === 1;
+  const handleOpenUp = () => {
+    if (isWin) {
+      setShowWinModal(true);
+      setAttempt(0); // Reset for demo, or keep at 2 for one-time win
+      if (typeof window !== 'undefined') localStorage.setItem('scratch-attempt', '0');
+    } else {
+      setAttempt(attempt + 1);
+      if (typeof window !== 'undefined') localStorage.setItem('scratch-attempt', (attempt + 1).toString());
+    }
+  };
+
+  // 1. Change background to a light gold/cream or abstract casino-style image
+  const lightGoldBg = 'https://brand-space.ams3.cdn.digitaloceanspaces.com/spin/lady/in_css_f5bf3e730d9927026d0a9e22c05afb35.static.jpg';
+
   return (
-    <div className="flex min-h-screen w-full flex-col bg-gradient-to-b from-purple-800 via-purple-900 to-indigo-900 text-white">
+    <div className="min-h-screen w-full flex flex-col items-center justify-center relative overflow-hidden" style={{ background: `url('${lightGoldBg}') center/cover no-repeat` }}>
+      {/* Transaction Status Modal */}
+      <TransactionModal
+        isOpen={modalOpen}
+        onClose={() => setModalOpen(false)}
+        type={modalType}
+        title={modalTitle}
+        message={modalMessage}
+        txHash={txHash}
+      />
+  
       {/* Header with wallet connection */}
-      <header className="w-full p-4 flex justify-between items-center border-b border-purple-600/50 backdrop-blur-sm bg-purple-900/90 sticky top-0 z-10">
+      <header className="w-full p-4 flex justify-between items-center border-b border-yellow-600/50 backdrop-blur-sm bg-red-900/90 sticky top-0 z-10">
         <div className="text-2xl font-bold flex items-center">
           <span className="text-3xl mr-2">💰</span>
           <span className="bg-clip-text text-transparent bg-gradient-to-r from-yellow-300 to-yellow-500">
@@ -980,7 +1085,7 @@ export default function InstantScratchAndWin() {
         </div>
         <ConnectButton />
       </header>
-
+  
       <main className="flex flex-col justify-center items-center flex-grow px-4 py-8 max-w-5xl mx-auto w-full">
         {isConnected ? (
           <>
@@ -989,12 +1094,12 @@ export default function InstantScratchAndWin() {
               {/* Left Column - Balance & Stats */}
               <div className="md:col-span-1">
                 {/* Balance display with loading state */}
-                <div className="bg-purple-800 rounded-xl p-6 w-full shadow-lg border border-purple-600 backdrop-blur-sm">
+                <div className="bg-red-800 rounded-xl p-6 w-full shadow-lg border border-yellow-600 backdrop-blur-sm">
                   <h2 className="text-xl font-semibold mb-4 flex items-center text-yellow-300">
                     <span className="mr-2">💰</span> Your Balance
                   </h2>
                   <div className="space-y-4">
-                    <div className="bg-purple-700/80 p-4 rounded-lg backdrop-blur-sm">
+                    <div className="bg-red-700/80 p-4 rounded-lg backdrop-blur-sm">
                       <div className="text-yellow-300 text-sm">ETH</div>
                       <div className="font-bold text-xl text-white">
                         {isLoadingEthBalance ? (
@@ -1005,7 +1110,7 @@ export default function InstantScratchAndWin() {
                         ) : ethBalance?.formatted.slice(0, 7) || "0"}
                       </div>
                     </div>
-                    <div className="bg-purple-700/80 p-4 rounded-lg backdrop-blur-sm">
+                    <div className="bg-red-700/80 p-4 rounded-lg backdrop-blur-sm">
                       <div className="text-yellow-300 text-sm">
                         {isLoadingTokenSymbol ? "Loading..." : String(tokenSymbol) || "Token"}
                       </div>
@@ -1023,42 +1128,42 @@ export default function InstantScratchAndWin() {
                     {isLoadingTokenName ? "Loading..." : tokenName ? `Token: ${String(tokenName)}` : "Connect to see token details"}
                   </div>
                 </div>
-
+  
                 {/* Coming Soon - Staking Module */}
-                <div className="mt-6 bg-purple-800 rounded-xl p-6 w-full shadow-lg border border-purple-600 backdrop-blur-sm relative overflow-hidden">
-                  <div className="absolute top-0 right-0 bg-pink-600 text-xs font-bold px-3 py-1 rounded-bl-lg text-white">
+                <div className="mt-6 bg-red-800 rounded-xl p-6 w-full shadow-lg border border-yellow-600 backdrop-blur-sm relative overflow-hidden">
+                  <div className="absolute top-0 right-0 bg-yellow-600 text-xs font-bold px-3 py-1 rounded-bl-lg text-white">
                     COMING SOON
                   </div>
                   <h2 className="text-xl font-semibold mb-4 flex items-center text-yellow-300">
                     <span className="mr-2">⚡</span> Token Staking
                   </h2>
-                  <p className="text-sm text-purple-200 mb-4">
+                  <p className="text-sm text-yellow-200 mb-4">
                     Stake your tokens to earn passive rewards and exclusive benefits!
                   </p>
-                  <div className="bg-purple-700/80 p-3 rounded-lg text-sm">
+                  <div className="bg-red-700/80 p-3 rounded-lg text-sm">
                     <div className="flex justify-between mb-1">
-                      <span className="text-purple-200">APY:</span>
+                      <span className="text-yellow-200">APY:</span>
                       <span className="font-bold text-yellow-300">Up to 25%</span>
                     </div>
                     <div className="flex justify-between">
-                      <span className="text-purple-200">Launch:</span>
+                      <span className="text-yellow-200">Launch:</span>
                       <span className="text-white">Q2 2025</span>
                     </div>
                   </div>
-                  <button className="w-full mt-4 py-2 bg-purple-600/80 rounded-lg text-white cursor-not-allowed border border-purple-500">
+                  <button className="w-full mt-4 py-2 bg-yellow-600/80 rounded-lg text-white cursor-not-allowed border border-yellow-500">
                     Staking Coming Soon
                   </button>
                 </div>
               </div>
-
+  
               {/* Middle and Right Columns - Game Section */}
               <div className="md:col-span-2">
                 {/* Game section with loading state */}
-                <div className="bg-purple-800 rounded-xl p-6 w-full shadow-lg border border-purple-600 backdrop-blur-sm">
-                  <h2 className="text-xl font-semibold mb-6 flex items-center text-yellow-300">
+                <div className="bg-yellow-50/80 rounded-2xl p-6 w-full shadow-lg border-4 border-yellow-400 backdrop-blur-md">
+                  <h2 className="text-xl font-semibold mb-6 flex items-center text-yellow-700">
                     <span className="mr-2">🎯</span> Scratch To Win!
                   </h2>
-
+  
                   {/* Bet amount input with loading state */}
                   <div className="mb-6">
                     <label className="block text-sm mb-2 text-yellow-300">
@@ -1072,12 +1177,12 @@ export default function InstantScratchAndWin() {
                         value={betAmount}
                         onChange={(e) => setBetAmount(e.target.value)}
                         disabled={isScratching || loading || isDataLoading}
-                        className="bg-purple-700/80 text-white rounded-l-lg p-3 w-full focus:outline-none focus:ring-2 focus:ring-purple-400 border border-purple-500 disabled:opacity-50"
+                        className="bg-yellow-100 text-yellow-700 rounded-l-lg p-3 w-full focus:outline-none focus:ring-2 focus:ring-yellow-400 border border-yellow-400 disabled:opacity-50"
                       />
                       <button
                         onClick={handlePlay}
                         disabled={isScratching || loading || isDataLoading}
-                        className="bg-pink-600 hover:bg-pink-500 disabled:bg-gray-600 disabled:cursor-not-allowed font-bold py-3 px-6 rounded-r-lg transition transform hover:scale-105 active:scale-95 shadow-lg text-white disabled:opacity-50"
+                        className="bg-gradient-to-r from-yellow-400 to-orange-400 text-white font-bold py-3 px-6 rounded-r-lg transition transform hover:scale-105 active:scale-95 shadow-lg disabled:opacity-50"
                       >
                         {loading ? (
                           <span className="flex items-center">
@@ -1092,7 +1197,7 @@ export default function InstantScratchAndWin() {
                         ) : "Play Now"}
                       </button>
                     </div>
-                    <div className="text-xs mt-2 text-purple-200 flex justify-between">
+                    <div className="text-xs mt-2 text-yellow-200 flex justify-between">
                       <span>
                         {isLoadingMinBet || isLoadingMaxBet || isLoadingTokenDecimals
                           ? "Loading bet limits..."
@@ -1103,92 +1208,50 @@ export default function InstantScratchAndWin() {
                       <span className="text-yellow-300">Win up to 5x your bet!</span>
                     </div>
                   </div>
-
-                  {/* Scratch card area with purple/gold design - mimicking the image */}
-                  <div className="relative w-full flex justify-center mb-6">
-                    <div className="relative w-[300px] h-[200px] rounded-xl overflow-hidden shadow-2xl transform transition-all duration-300 hover:scale-105">
-                      {/* Background canvas with reward (visible after scratching) - Gold background with patterns like in the reference */}
-                      <canvas
-                        ref={scratchRef}
-                        width={300}
-                        height={200}
-                        className="absolute top-0 left-0 w-full h-full bg-gradient-to-br from-yellow-400 to-yellow-300"
-                      />
-
-                      {/* Scratch overlay canvas - Black overlay that gets scratched away */}
-                      <canvas
-                        ref={canvasRef}
-                        width={300}
-                        height={200}
-                        className={`absolute top-0 left-0 w-full h-full ${isScratching ? 'cursor-pointer' : 'cursor-default'} bg-black`}
-                        onMouseDown={handleScratchStart}
-                        onMouseMove={handleScratch}
-                        onMouseUp={handleScratchEnd}
-                        onMouseLeave={handleScratchEnd}
-                        onTouchStart={handleScratchStart}
-                        onTouchMove={handleScratch}
-                        onTouchEnd={handleScratchEnd}
-                      />
-
-                      {/* Instructions overlay */}
-                      {isScratching && !isRevealed && (
-                        <div className="absolute bottom-10 left-0 right-0 flex justify-center">
-                          <div className="bg-purple-900/70 rounded-full h-1 w-3/4 overflow-hidden">
-                            <div
-                              className="bg-yellow-400 h-full transition-all duration-300"
-                              style={{ width: `${Math.min(percentScratched, 100)}%` }}
-                            />
-                          </div>
+  
+                  {/* Main scratch area with mascot */}
+                  <div className="flex flex-row items-center justify-center gap-8 w-full max-w-3xl mx-auto mt-8">
+                    {/* Mascot image, vertically centered to the card */}
+                    <div className="flex flex-col items-center justify-center h-[420px]">
+                      <img src="https://brand-space.ams3.cdn.digitaloceanspaces.com/spin/lady/images/v2.png" alt="Mascot" className="h-[380px] w-auto object-contain drop-shadow-2xl" />
+                    </div>
+                    {/* Scratch card area */}
+                    <div className="flex flex-col items-center bg-transparent">
+                      {/* Card outer */}
+                      <div className="w-[320px] rounded-[24px] border-4 border-yellow-400 bg-gradient-to-b from-yellow-50 to-yellow-100 shadow-2xl flex flex-col items-center pb-6" style={{ boxShadow: '0 8px 32px 0 rgba(255, 193, 7, 0.15)' }}>
+                        {/* Gold header with stars and attempts */}
+                        <div className="w-[90%] mx-auto mt-4 mb-4 bg-gradient-to-r from-yellow-400 to-orange-300 py-2 px-4 flex items-center justify-center rounded-xl border-b-2 border-yellow-500 shadow" style={{ minHeight: '48px' }}>
+                          <span className="text-yellow-900 text-xl mr-2">★</span>
+                          <span className="text-yellow-900 text-xl mr-2">★</span>
+                          <span className="text-white font-bold text-base tracking-wide">YOU HAVE 2 ATTEMPTS</span>
                         </div>
-                      )}
-
-                      {/* Instructions overlay */}
-                      {!isScratching && !loading && (
-                        <div className="absolute inset-0 flex items-center justify-center bg-purple-900 bg-opacity-90 text-white text-center p-4">
-                          <div className="transform transition-all hover:scale-105">
-                            <p className="text-lg font-bold text-yellow-300">
-                              Place a bet to play!
-                            </p>
-                            <p className="text-sm mt-2 text-purple-200">
-                              Scratch the card to reveal your prize
-                            </p>
-                          </div>
+                        {/* 3 large horizontal scratch boxes */}
+                        <div className="flex flex-col gap-3 w-full px-4 mb-6">
+                          {[0,1,2].map((idx) => (
+                            <div key={idx} className={`relative border-2 rounded-xl h-20 flex items-center justify-center shadow-md overflow-hidden ${isWin && idx === 1 ? 'bg-gradient-to-br from-yellow-200 to-yellow-100 border-yellow-400' : 'bg-gradient-to-br from-yellow-100 to-yellow-200 border-yellow-300'}`}
+                              style={{ background: isWin && idx === 1 ? 'repeating-linear-gradient(135deg, #ffe082, #ffe082 20px, #ffd54f 20px, #ffd54f 40px)' : 'repeating-linear-gradient(135deg, #f8e9c1, #f8e9c1 20px, #f3d88e 20px, #f3d88e 40px)' }}>
+                              {/* Diagonal watermark or result */}
+                              <span className="absolute left-1/2 top-1/2 text-[20px] font-bold select-none" style={{ transform: 'translate(-50%, -50%) rotate(-20deg)', pointerEvents: 'none', userSelect: 'none', whiteSpace: 'nowrap', letterSpacing: '2px', color: isWin && idx === 1 ? '#d4af37' : '#e0b200', opacity: 0.7 }}>
+                                {isWin && idx === 1 ? '🎉 WIN!' : 'Scratch here'}
+                              </span>
+                            </div>
+                          ))}
                         </div>
-                      )}
-
-                      {/* Loading overlay with improved animation */}
-                      {loading && (
-                        <div className="absolute inset-0 flex items-center justify-center bg-purple-900 bg-opacity-90 text-white">
-                          <div className="text-center">
-                            <div className="inline-block w-10 h-10 border-4 border-t-yellow-400 border-r-transparent border-b-yellow-500 border-l-transparent rounded-full animate-spin mb-3"></div>
-                            <p className="text-purple-200">Processing transaction...</p>
-                          </div>
-                        </div>
-                      )}
-
-                      {/* Scratch instruction with animation */}
-                      {isScratching && !isRevealed && (
-                        <div className="absolute bottom-3 left-0 right-0 text-center">
-                          <div className="inline-block text-purple-900 text-sm bg-yellow-400 py-2 px-4 rounded-full animate-bounce font-bold">
-                            <span className="mr-1">{isTouchDevice ? '👆' : '🖱️'}</span>
-                            {isTouchDevice ? 'Scratch the card!' : 'Click and drag to scratch!'}
-                          </div>
-                        </div>
-                      )}
-
-                      {/* Sound toggle button */}
-                      <button
-                        onClick={toggleMute}
-                        className="absolute top-2 right-2 z-20 bg-purple-900/50 p-1 rounded-full"
-                      >
-                        <span className="text-sm">{soundEnabled ? '🔊' : '🔇'}</span>
-                      </button>
+                        {/* OPEN UP button */}
+                        <button onClick={handleOpenUp} className="mt-2 bg-gradient-to-r from-yellow-400 to-orange-400 hover:from-yellow-300 hover:to-orange-300 text-white font-bold py-4 px-16 rounded-full text-xl shadow-lg border-4 border-white transition-all duration-200 tracking-wide relative" style={{ boxShadow: '0 0 16px 2px #fffbe7, 0 4px 24px 0 #ff9800' }}>
+                          OPEN UP
+                        </button>
+                        {/* Show a message for loss */}
+                        {!isWin && attempt === 1 && (
+                          <div className="mt-4 text-lg font-bold text-red-500">Try Again!</div>
+                        )}
+                      </div>
                     </div>
                   </div>
-
+  
                   {/* Rewards table */}
-                  <div className="w-full mt-2 overflow-hidden rounded-lg bg-purple-700/60 backdrop-blur-sm border border-purple-500">
-                    <div className="text-sm font-medium text-center text-yellow-300 py-2 border-b border-purple-600/50">
+                  <div className="w-full mt-2 overflow-hidden rounded-lg bg-yellow-50 border border-yellow-400">
+                    <div className="text-sm font-medium text-center text-yellow-700 py-2 border-b border-yellow-600/50">
                       Possible Rewards
                     </div>
                     <div className="grid grid-cols-4 gap-1 p-2 text-sm">
@@ -1197,59 +1260,46 @@ export default function InstantScratchAndWin() {
                           .filter(reward => reward.multiplier > 0)
                           .slice(0, 4)
                           .map((reward, index) => (
-                            <div key={index} className="bg-purple-800/60 rounded p-2 text-center">
-                              <div className="font-bold text-yellow-300">{reward.name}</div>
-                              <div className="text-xs text-purple-200">{(reward.probability * 100).toFixed(1)}% chance</div>
+                            <div key={index} className="bg-yellow-100 rounded p-2 text-center">
+                              <div className="font-bold text-yellow-700">{reward.name}</div>
+                              <div className="text-xs text-yellow-200">{(reward.probability * 100).toFixed(1)}% chance</div>
                             </div>
                           ))
                       ) : (
                         <>
-                          <div className="bg-purple-800/60 rounded p-2 text-center">
-                            <div className="font-bold text-yellow-300">5x Tokens</div>
-                            <div className="text-xs text-purple-200">2.0% chance</div>
+                          <div className="bg-yellow-100 rounded p-2 text-center">
+                            <div className="font-bold text-yellow-700">5x Tokens</div>
+                            <div className="text-xs text-yellow-200">2.0% chance</div>
                           </div>
-                          <div className="bg-purple-800/60 rounded p-2 text-center">
-                            <div className="font-bold text-yellow-300">3x Tokens</div>
-                            <div className="text-xs text-purple-200">5.0% chance</div>
+                          <div className="bg-yellow-100 rounded p-2 text-center">
+                            <div className="font-bold text-yellow-700">3x Tokens</div>
+                            <div className="text-xs text-yellow-200">5.0% chance</div>
                           </div>
-                          <div className="bg-purple-800/60 rounded p-2 text-center">
-                            <div className="font-bold text-yellow-300">2x Tokens</div>
-                            <div className="text-xs text-purple-200">10.0% chance</div>
+                          <div className="bg-yellow-100 rounded p-2 text-center">
+                            <div className="font-bold text-yellow-700">2x Tokens</div>
+                            <div className="text-xs text-yellow-200">10.0% chance</div>
                           </div>
-                          <div className="bg-purple-800/60 rounded p-2 text-center">
-                            <div className="font-bold text-yellow-300">1.5x Tokens</div>
-                            <div className="text-xs text-purple-200">15.0% chance</div>
+                          <div className="bg-yellow-100 rounded p-2 text-center">
+                            <div className="font-bold text-yellow-700">1.5x Tokens</div>
+                            <div className="text-xs text-yellow-200">15.0% chance</div>
                           </div>
                         </>
                       )}
                     </div>
                   </div>
-
-                  {/* Result display with enhanced animation and design */}
-                  {isRevealed && reward && (
-                    <motion.div
-                      initial={{ opacity: 0, y: 20 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      transition={{ duration: 0.5, ease: "easeOut" }}
-                      className="mt-6 bg-purple-700/60 p-5 rounded-xl text-center border border-purple-500 backdrop-blur-sm"
-                    >
-                      <h3 className="text-2xl font-bold text-yellow-300">
-                        {reward.multiplier > 0 && "🎉 "}{reward.name}
-                      </h3>
-                      <p className="mt-2 text-lg text-white">
-                        {reward.multiplier > 0
-                          ? `You won ${(parseFloat(betAmount) * reward.multiplier).toFixed(2)} ${String(tokenSymbol)}!`
-                          : 'Better luck next time!'}
-                      </p>
-                      <button
-                        onClick={handlePlay}
-                        className="mt-4 bg-pink-600 hover:bg-pink-500 font-bold py-3 px-8 rounded-lg transition transform hover:scale-105 active:scale-95 shadow-lg text-white"
-                      >
-                        Play Again
-                      </button>
-                    </motion.div>
+  
+                  {/* Win Celebration Modal - This appears on win */}
+                  {showWinModal && (
+                    <div className="fixed inset-0 flex items-center justify-center z-50 bg-black/70">
+                      <div className="bg-gradient-to-b from-yellow-100 to-yellow-300 border-4 border-yellow-400 rounded-2xl shadow-2xl p-10 max-w-md w-full text-center relative animate-bounce">
+                        <div className="absolute -top-8 left-1/2 -translate-x-1/2 w-20 h-20 bg-yellow-400 rounded-full flex items-center justify-center text-4xl shadow-lg border-4 border-yellow-300">🎉</div>
+                        <h2 className="text-3xl font-bold text-yellow-800 mb-4 mt-8">Congratulations!</h2>
+                        <p className="text-xl text-yellow-700 mb-6">You won 100 JKPT!</p>
+                        <button onClick={() => setShowWinModal(false)} className="py-4 px-12 bg-gradient-to-r from-yellow-400 to-orange-400 text-white font-bold rounded-full text-xl shadow-lg border-2 border-white transition-all duration-200 tracking-wide">CLAIM HERE</button>
+                      </div>
+                    </div>
                   )}
-
+  
                   {/* Error message */}
                   {error && (
                     <div className="bg-red-800/70 text-white p-4 rounded-lg mt-4 text-sm backdrop-blur-sm border border-red-700/30">
@@ -1259,10 +1309,10 @@ export default function InstantScratchAndWin() {
                       </div>
                     </div>
                   )}
-
+  
                   {/* Transaction details */}
                   {txHash && (
-                    <div className="mt-4 text-xs text-purple-200 bg-purple-800/30 p-3 rounded-lg backdrop-blur-sm">
+                    <div className="mt-4 text-xs text-yellow-200 bg-red-800/30 p-3 rounded-lg backdrop-blur-sm">
                       <div className="flex items-center">
                         <span className="mr-2">🔗</span>
                         <span>Transaction: {txHash.slice(0, 6)}...{txHash.slice(-4)}</span>
@@ -1275,18 +1325,18 @@ export default function InstantScratchAndWin() {
           </>
         ) : (
           // Not connected view
-          <div className="text-center p-8 bg-purple-900/50 rounded-xl backdrop-blur-sm border border-purple-600 max-w-lg">
+          <div className="text-center p-8 bg-red-900/50 rounded-xl backdrop-blur-sm border border-yellow-600 max-w-lg">
             <div className="text-6xl mb-6">💰</div>
             <h2 className="text-3xl font-bold mb-4 bg-clip-text text-transparent bg-gradient-to-r from-yellow-300 to-yellow-500">
               Welcome to Instant Scratch & Win!
             </h2>
-            <p className="mb-8 text-purple-200">
+            <p className="mb-8 text-yellow-200">
               Connect your wallet to start playing and winning tokens!
             </p>
-            <div className="inline-block p-2 bg-purple-800/50 rounded-lg backdrop-blur-sm">
+            <div className="inline-block p-2 bg-red-800/50 rounded-lg backdrop-blur-sm">
               <ConnectButton />
             </div>
-            <div className="mt-8 text-sm text-purple-200">
+            <div className="mt-8 text-sm text-yellow-200">
               <div className="flex flex-col gap-2">
                 <div className="flex items-center gap-2">
                   <span className="text-yellow-300">✓</span>
@@ -1309,15 +1359,15 @@ export default function InstantScratchAndWin() {
           </div>
         )}
       </main>
-
+  
       {/* Footer */}
-      <footer className="w-full p-4 border-t border-purple-600/50 text-center text-sm text-purple-300 backdrop-blur-sm bg-purple-900/30">
+      <footer className="w-full p-4 border-t border-yellow-600/50 text-center text-sm text-yellow-300 backdrop-blur-sm bg-red-900/30">
         <div className="max-w-5xl mx-auto flex flex-col md:flex-row justify-between items-center gap-3">
           <p>© 2025 Instant Scratch & Win DApp | Play Responsibly</p>
           <div className="flex gap-4">
-            <a href="#" className="hover:text-yellow-300 transition">Terms</a>
-            <a href="#" className="hover:text-yellow-300 transition">Docs</a>
-            <a href="#" className="hover:text-yellow-300 transition">Contact</a>
+            <a href="#" className="hover:text-yellow-400 transition">Terms</a>
+            <a href="#" className="hover:text-yellow-400 transition">Docs</a>
+            <a href="#" className="hover:text-yellow-400 transition">Contact</a>
           </div>
         </div>
       </footer>

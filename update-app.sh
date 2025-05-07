@@ -9,7 +9,7 @@ set -e
 # Configuration
 APP_DIR="/var/www/jkpt-web3"  # Update this to match your application directory
 APP_NAME="jkpt-web3"          # Update this to match your PM2 application name
-GIT_BRANCH="main"             # Update this to match your branch
+GIT_BRANCH="master"             # Update this to match your branch
 
 # Colors for output
 GREEN='\033[0;32m'
