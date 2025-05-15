@@ -24,7 +24,7 @@ const tokenApprovalAbi = [
  * @param spenderAddress The address that will spend the tokens
  * @param decimals The number of decimals for the token
  */
-export function useApprove(tokenAddress: string, spenderAddress: string, decimals: number = 18) {
+export function useApprove(tokenAddress: `0x${string}`, spenderAddress: `0x${string}`, decimals: number = 18) {
   const [isApproving, setIsApproving] = useState(false);
   const [approvalError, setApprovalError] = useState<string | null>(null);
   const [approvalSuccess, setApprovalSuccess] = useState(false);
@@ -63,7 +63,10 @@ export function useApprove(tokenAddress: string, spenderAddress: string, decimal
         address: tokenAddress,
         abi: tokenApprovalAbi,
         functionName: 'approve',
-        args: [spenderAddress, amountInUnits]
+        args: [spenderAddress, amountInUnits],
+        // Replace with the correct account (the user's wallet address)
+        account: spenderAddress,
+        chain: publicClient.chain // Add the required chain property
       });
 
       setApprovalHash(hash);
