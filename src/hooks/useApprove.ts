@@ -29,10 +29,10 @@ export function useApprove(tokenAddress: string, spenderAddress: string, decimal
   const [approvalError, setApprovalError] = useState<string | null>(null);
   const [approvalSuccess, setApprovalSuccess] = useState(false);
   const [approvalHash, setApprovalHash] = useState<string | null>(null);
-  
+
   const { writeContractAsync } = useWriteContract();
   const publicClient = usePublicClient();
-  
+
   // Reset states
   const resetStates = () => {
     setApprovalError(null);
@@ -54,10 +54,10 @@ export function useApprove(tokenAddress: string, spenderAddress: string, decimal
     try {
       resetStates();
       setIsApproving(true);
-      
+
       // Convert amount to token units
       const amountInUnits = parseUnits(amount, decimals);
-      
+
       // Send approval transaction
       const hash = await writeContractAsync({
         address: tokenAddress,
@@ -65,20 +65,34 @@ export function useApprove(tokenAddress: string, spenderAddress: string, decimal
         functionName: 'approve',
         args: [spenderAddress, amountInUnits]
       });
-      
+
       setApprovalHash(hash);
-      
-      // Wait for transaction receipt
-      const receipt = await publicClient.waitForTransactionReceipt({
-        hash
-      });
-      
-      // Check if transaction was successful
-      if (receipt.status === 'success') {
-        setApprovalSuccess(true);
-        if (onSuccess) onSuccess();
-      } else {
-        throw new Error('Approval transaction failed');
+
+      console.log("Approval transaction submitted:", hash);
+
+      try {
+        // Wait for transaction receipt with timeout and retry logic
+        console.log("Waiting for approval transaction receipt...");
+        const receipt = await publicClient.waitForTransactionReceipt({
+          hash,
+          timeout: 60_000, // 60 seconds timeout
+          confirmations: 1  // Wait for at least 1 confirmation
+        });
+
+        console.log("Approval transaction receipt received:", receipt);
+
+        // Check if transaction was successful
+        if (receipt.status === 'success') {
+          console.log("Approval transaction successful");
+          setApprovalSuccess(true);
+          if (onSuccess) onSuccess();
+        } else {
+          console.error("Approval transaction failed with status:", receipt.status);
+          throw new Error('Approval transaction failed');
+        }
+      } catch (receiptError) {
+        console.error("Error waiting for approval receipt:", receiptError);
+        throw new Error(`Failed to get transaction receipt: ${receiptError instanceof Error ? receiptError.message : 'Unknown error'}`);
       }
     } catch (error) {
       console.error('Approval error:', error);
@@ -88,7 +102,7 @@ export function useApprove(tokenAddress: string, spenderAddress: string, decimal
       setIsApproving(false);
     }
   };
-  
+
   return {
     approve,
     isApproving,

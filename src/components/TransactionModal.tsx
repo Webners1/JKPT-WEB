@@ -20,6 +20,14 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
   message,
   txHash
 }) => {
+  // Handle close with additional logic
+  const handleClose = () => {
+    // Only allow closing if not in loading state
+    if (type !== 'loading') {
+      onClose();
+    }
+  };
+
   if (!isOpen) return null;
 
   const getIcon = () => {
@@ -69,20 +77,22 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
             transition={{ duration: 0.2 }}
             className={`relative max-w-md w-full rounded-xl shadow-lg ${getColor()} border p-6`}
           >
-            <button
-              onClick={onClose}
-              className="absolute top-3 right-3 text-gray-500 hover:text-gray-700"
-            >
-              <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-              </svg>
-            </button>
-            
+            {type !== 'loading' && (
+              <button
+                onClick={handleClose}
+                className="absolute top-3 right-3 text-gray-500 hover:text-gray-700"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            )}
+
             <div className="flex flex-col items-center text-center">
               {getIcon()}
               <h3 className="mt-4 text-xl font-semibold">{title}</h3>
               <p className="mt-2 text-gray-600">{message}</p>
-              
+
               {txHash && (
                 <div className="mt-4 text-xs text-gray-500 bg-gray-100 p-3 rounded-lg w-full break-all">
                   <div className="flex items-center">
@@ -91,13 +101,15 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
                   </div>
                 </div>
               )}
-              
-              <button
-                onClick={onClose}
-                className="mt-6 bg-purple-600 hover:bg-purple-500 text-white font-bold py-2 px-6 rounded-lg transition transform hover:scale-105 active:scale-95"
-              >
-                Dismiss
-              </button>
+
+              {type !== 'loading' && (
+                <button
+                  onClick={handleClose}
+                  className="mt-6 bg-purple-600 hover:bg-purple-500 text-white font-bold py-2 px-6 rounded-lg transition transform hover:scale-105 active:scale-95"
+                >
+                  Dismiss
+                </button>
+              )}
             </div>
           </motion.div>
         </div>
